@@ -1,0 +1,15 @@
+# Build-Ausgaben
+build/
+*.bin
+*.elf
+*.map
+
+# Python
+__pycache__/
+*.pyc
+
+# Editoren / Betriebssysteme
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

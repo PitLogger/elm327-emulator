@@ -1,0 +1,3 @@
+# Standard-Board für "arduino-cli compile" ohne --fqbn.
+# Classic-Bluetooth + BLE brauchen das Partitionsschema "huge_app".
+default_fqbn: esp32:esp32:esp32:PartitionScheme=huge_app
