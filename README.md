@@ -1,8 +1,9 @@
 # ELM327 emulator for ESP32
 
 An ESP32 that behaves like an ELM327 OBD-II adapter connected to a vehicle with a CAN bus
-(ISO 15765-4, 11 bit, 500 kbit/s). Develop and test OBD apps, diagnostic tools and your own
-projects at your desk – no car needed.
+(ISO 15765-4, 11 bit, 500 kbit/s) – and, with a CAN transceiver, like the vehicle itself on a
+real CAN bus. Develop and test OBD apps, diagnostic tools, loggers and your own projects at your
+desk – no car needed.
 
 Created as part of the PitLogger project, but stands on its own and works with any
 ELM327-compatible software.
@@ -23,11 +24,22 @@ ELM327-compatible software.
 - **Mode 03 / 07 / 0A** trouble codes (stored: `P0133`, `P0301`), **mode 04** clear codes
 - **Mode 09** VIN (multi-frame / ISO-TP) and ECU name
 - Responses with/without headers (`ATH1`/`ATH0`) and with/without spaces (`ATS1`/`ATS0`)
+- **Real vehicles:** manufacturer requests (services 21/22) answered with answers recorded in
+  real cars – **Hyundai i30 N 2021** (steering angle, wheel speeds, brake pressure, doors, …) and
+  **Toyota bZ4X 2022** (traction battery, charging, …). Addressed with `ATSH` like on a real
+  adapter, e.g. `ATSH7D1` then `220104`. `ATPLV` lists the vehicles, `ATPLV1` selects one
+  (`0` = only the simulated VW Golf); the choice is kept across restarts
+- **CAN bus:** with an SN65HVD230 transceiver the emulator answers on a real 500 kbit/s bus –
+  OBD-II requests (`7DF` / `7E0` → `7E8`) and the recorded requests of the selected vehicle, with
+  ISO-TP flow control. Ideal as the counterpart of a logger with a CAN interface
 
 ## Hardware
 
 - ESP32 **with Bluetooth Classic**, i.e. the original ESP32 (e.g. ESP32-DevKitC,
   ESP32-WROOM-32). ESP32-S2/S3/C3 have no Bluetooth Classic.
+- Optional: **CAN transceiver** SN65HVD230 (3.3 V): CTX ← GPIO 21, CRX → GPIO 22, 3V3, GND;
+  CANH / CANL to the other node. Both ends of the bus need 120 Ω (the modules have it on board).
+  Connect the grounds of both boards.
 - Optional: **GPIO 13 to GND** makes the emulator invisible (drops connections, no Bluetooth
   discoverability). Left open = Bluetooth on. The onboard LED on GPIO 2 shows the state.
 
@@ -63,6 +75,18 @@ python tools/elm_test.py COM3
 
 Over Bluetooth, any OBD app works (e.g. Car Scanner, Torque) – pick the adapter "OBDII".
 
+## Recorded vehicle data
+
+`ELM327_Emulator/vehicles.h` is generated from the test cases of
+[PitLogger/vehicle-profiles](https://github.com/PitLogger/vehicle-profiles), which were recorded by
+[OBDb](https://github.com/OBDb) contributors:
+
+```bash
+python tools/gen_vehicles.py ../vehicle-profiles
+```
+
 ## License
 
-MIT, see [LICENSE](LICENSE).
+The code is MIT, see [LICENSE](LICENSE). The recorded vehicle answers in
+`ELM327_Emulator/vehicles.h` come from OBDb and are licensed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).

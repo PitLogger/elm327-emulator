@@ -11,6 +11,15 @@
  *   - mode 03/07/0A: trouble codes, mode 04: clear trouble codes
  *   - mode 09: VIN (multi-frame / ISO-TP) and ECU name
  *   - responses with/without headers (ATH1/ATH0) and with/without spaces (ATS0/1)
+ *   - manufacturer requests (services 21/22) of real vehicles with their recorded
+ *     answers (vehicles.h), selected with ATSH like on a real adapter
+ *
+ * CAN bus: with an SN65HVD230 transceiver on GPIO 21 (TX) and 22 (RX) the emulator is also a
+ * vehicle on a real 500 kbit/s CAN bus: it answers OBD-II requests (7DF / 7E0 -> 7E8) and the
+ * recorded manufacturer requests of the selected vehicle, with ISO-TP flow control.
+ *
+ * Vehicle: "ATPLV" lists the vehicles, "ATPLV1" selects one (stored across restarts).
+ *   0 = simulated VW Golf (only standard OBD-II), 1 = Hyundai i30 N 2021, 2 = Toyota bZ4X 2022
  *
  * Reachable in three ways (usable at the same time):
  *   - USB serial (e.g. COM3), 38400 baud, 8N1, line ending CR
@@ -35,6 +44,9 @@
 #include <BLE2902.h>
 #include <esp_gap_bt_api.h>
 #include <freertos/stream_buffer.h>
+#include <Preferences.h>
+#include <driver/twai.h>
+#include "vehicles.h"
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED) || !defined(CONFIG_BT_SPP_ENABLED)
 #error "Bluetooth Classic (SPP) is not available on this board"
@@ -53,9 +65,15 @@
 #define ELM_BAUD        38400                 // default baud rate of an ELM327
 #define ELM_VERSION     "ELM327 v1.5"
 #define ELM_DEVICE_DESC "OBDII to RS232 Interpreter"
-#define ECU_HEADER      "7E8"                 // CAN ID of the engine control unit's responses
+#define ECU_REQUEST     0x7E0                 // CAN ID of requests to the engine control unit
+#define ECU_RESPONSE    0x7E8                 // CAN ID of its responses
+#define OBD_FUNCTIONAL  0x7DF                 // CAN ID of requests to all control units
+#define CAN_TX_PIN      21                    // to CTX of the SN65HVD230
+#define CAN_RX_PIN      22                    // to CRX of the SN65HVD230
+#define CAN_PADDING     0xAA                  // fills unused bytes of a frame
+#define CAN_FC_WAIT_MS  1000                  // wait for the tester's flow control frame
 
-static const char VIN[]      = "WVWZZZ1KZ6W000001";   // exactly 17 characters
+static const char SIM_VIN[]  = "WVWZZZ1KZ6W000001";   // exactly 17 characters
 static const char ECU_NAME[] = "ECM-EngineControl";   // max. 20 characters
 
 // ---------------- ELM state ----------------
@@ -133,6 +151,20 @@ static bool    btActive = false;
 
 static ElmSettings cfg;
 static String lastCmd;
+static uint16_t elmHeader = OBD_FUNCTIONAL;   // set with ATSH
+
+// Selected vehicle: 0 = simulation only, 1.. = REC_VEHICLES[n - 1]
+static Preferences prefs;
+static uint8_t     vehicleSel;
+
+static const RecVehicle *recVehicle() {
+  return vehicleSel >= 1 && vehicleSel <= REC_VEHICLE_COUNT ? &REC_VEHICLES[vehicleSel - 1] : nullptr;
+}
+
+static const char *vin() {
+  const RecVehicle *v = recVehicle();
+  return v ? v->vin : SIM_VIN;
+}
 
 static const char *PROTOCOL_NAMES[] = {
   "AUTO",
@@ -157,6 +189,7 @@ static void resetSettings() {
   cfg.headers      = false;
   cfg.autoProtocol = true;
   cfg.protocol     = 6;
+  elmHeader        = OBD_FUNCTIONAL;
 }
 
 // ---------------- Simulated vehicle ----------------
@@ -231,13 +264,19 @@ static void appendByte(String &out, uint8_t b) {
   out += hex;
 }
 
+static String canIdText(uint16_t id) {
+  char s[4];
+  snprintf(s, sizeof(s), "%03X", id);
+  return s;
+}
+
 // Outputs an ECU response. Up to 7 bytes as a single frame, above that as an
 // ISO-TP multi-frame in the typical ELM327 format.
-static void sendEcuResponse(const uint8_t *data, size_t len) {
+static void sendEcuResponse(const uint8_t *data, size_t len, uint16_t from = ECU_RESPONSE) {
   if (len <= 7) {
     String line;
     if (cfg.headers) {
-      line = ECU_HEADER;
+      line = canIdText(from);
       appendByte(line, len);
     }
     for (size_t i = 0; i < len; i++) appendByte(line, data[i]);
@@ -257,7 +296,7 @@ static void sendEcuResponse(const uint8_t *data, size_t len) {
     String line;
     size_t chunk = (seq == 0) ? 6 : 7;
     if (cfg.headers) {
-      line = ECU_HEADER;
+      line = canIdText(from);
       if (seq == 0) {
         appendByte(line, 0x10 | ((len >> 8) & 0x0F));
         appendByte(line, len & 0xFF);
@@ -361,13 +400,9 @@ static int readPid01(uint8_t pid, uint8_t *out) {
 }
 
 // ---------------- OBD requests ----------------
-static void sendNegative(uint8_t mode, uint8_t nrc) {
-  uint8_t r[] = { 0x7F, mode, nrc };
-  sendEcuResponse(r, sizeof(r));
-}
+// The answers are built as bytes and then output either as ELM327 text or as CAN frames.
 
-static void sendDtcList(uint8_t respMode, const uint16_t *list, uint8_t count) {
-  uint8_t r[2 + 2 * 8];
+static size_t dtcList(uint8_t respMode, const uint16_t *list, uint8_t count, uint8_t *r) {
   size_t n = 0;
   r[n++] = respMode;
   r[n++] = count;
@@ -375,11 +410,10 @@ static void sendDtcList(uint8_t respMode, const uint16_t *list, uint8_t count) {
     r[n++] = list[i] >> 8;
     r[n++] = list[i] & 0xFF;
   }
-  sendEcuResponse(r, n);
+  return n;
 }
 
-static void handleMode09(uint8_t pid) {
-  uint8_t r[32];
+static size_t mode09(uint8_t pid, uint8_t *r) {
   size_t n = 0;
   r[n++] = 0x49;
   r[n++] = pid;
@@ -387,23 +421,81 @@ static void handleMode09(uint8_t pid) {
     case 0x00: {
       uint32_t m = (1UL << (32 - 0x02)) | (1UL << (32 - 0x0A));
       r[n++] = m >> 24; r[n++] = m >> 16; r[n++] = m >> 8; r[n++] = m;
-      break;
+      return n;
     }
     case 0x02:
       r[n++] = 0x01;
-      for (size_t i = 0; i < 17; i++) r[n++] = VIN[i];
-      break;
+      for (size_t i = 0; i < 17; i++) r[n++] = vin()[i];
+      return n;
     case 0x0A:
       r[n++] = 0x01;
       for (size_t i = 0; i < 20; i++) r[n++] = i < strlen(ECU_NAME) ? ECU_NAME[i] : 0x00;
-      break;
-    default:
-      printLine("NO DATA");
-      return;
+      return n;
   }
-  sendEcuResponse(r, n);
+  return 0;
 }
 
+// Answer of the simulated engine control unit to a standard OBD-II request (service first).
+// Returns the length, 0 = no answer ("NO DATA").
+static size_t ecuAnswer(const uint8_t *req, size_t n, uint8_t *resp) {
+  if (n == 0) return 0;
+  switch (req[0]) {
+    case 0x01: {
+      size_t len = 0;
+      resp[len++] = 0x41;
+      for (size_t i = 1; i < n && i <= 6; i++) {
+        uint8_t data[4];
+        int dl = readPid01(req[i], data);
+        if (dl < 0) continue;
+        resp[len++] = req[i];
+        memcpy(resp + len, data, dl);
+        len += dl;
+      }
+      return len == 1 ? 0 : len;
+    }
+    case 0x03: return dtcList(0x43, dtcs, dtcCount, resp);
+    case 0x07: return dtcList(0x47, nullptr, 0, resp);
+    case 0x0A: return dtcList(0x4A, nullptr, 0, resp);
+    case 0x04:
+      dtcCount    = 0;
+      car.distMil = 0;
+      resp[0] = 0x44;
+      return 1;
+    case 0x09: return n < 2 ? 0 : mode09(req[1], resp);
+    case 0x02: return 0;   // freeze frame not implemented
+  }
+  resp[0] = 0x7F; resp[1] = req[0]; resp[2] = 0x11;   // serviceNotSupported
+  return 3;
+}
+
+// Recorded answer of the selected real vehicle to a manufacturer request sent to CAN ID tx.
+// Consecutive requests return the recorded answers in turn, so values change. A known control
+// unit answers unknown identifiers with "request out of range" like a real one.
+static bool recordedAnswer(uint16_t tx, const uint8_t *req, size_t n, uint16_t &rx,
+                           const uint8_t *&data, size_t &len, uint8_t *negative) {
+  const RecVehicle *v = recVehicle();
+  if (!v || n == 0) return false;
+  static uint8_t turn[256];
+  bool knownUnit = false;
+  for (uint16_t i = 0; i < v->requestCount; i++) {
+    const RecRequest &r = v->requests[i];
+    if (r.tx != tx) continue;
+    knownUnit = true;
+    rx = r.rx;
+    if (r.reqLen != n || memcmp(r.req, req, n) != 0) continue;
+    const RecAnswer &a = REC_ANSWERS[r.first + turn[i & 0xFF]++ % r.count];
+    data = REC_DATA + a.offset;
+    len  = a.len;
+    return true;
+  }
+  if (!knownUnit || (req[0] != 0x21 && req[0] != 0x22)) return false;
+  negative[0] = 0x7F; negative[1] = req[0]; negative[2] = 0x31;   // requestOutOfRange
+  data = negative;
+  len  = 3;
+  return true;
+}
+
+// ELM327 text interface: hex request -> answer of the control unit addressed with ATSH
 static void handleObd(String cmd) {
   for (size_t i = 0; i < cmd.length(); i++) {
     if (!isxdigit(cmd[i])) { printLine("?"); return; }
@@ -419,44 +511,124 @@ static void handleObd(String cmd) {
   if (n > sizeof(req)) { printLine("?"); return; }
   for (size_t i = 0; i < n; i++) req[i] = strtoul(cmd.substring(2 * i, 2 * i + 2).c_str(), nullptr, 16);
 
-  uint8_t mode = req[0];
-  switch (mode) {
-    case 0x01: {
+  uint16_t       rx;
+  const uint8_t *rec;
+  size_t         len;
+  uint8_t        neg[3];
+  if (recordedAnswer(elmHeader, req, n, rx, rec, len, neg)) {
+    sendEcuResponse(rec, len, rx);
+    return;
+  }
+  if (elmHeader != OBD_FUNCTIONAL && elmHeader != ECU_REQUEST) {
+    printLine("NO DATA");
+    return;
+  }
+  uint8_t resp[64];
+  len = ecuAnswer(req, n, resp);
+  if (len) sendEcuResponse(resp, len);
+  else printLine("NO DATA");
+}
+
+// ---------------- CAN bus (ISO 15765-2) ----------------
+static bool canUp;
+
+static void canBegin() {
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN, (gpio_num_t)CAN_RX_PIN, TWAI_MODE_NORMAL);
+  g.rx_queue_len = 32;
+  g.tx_queue_len = 16;
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  canUp = twai_driver_install(&g, &t, &f) == ESP_OK && twai_start() == ESP_OK;
+}
+
+static bool canFrame(uint16_t id, const uint8_t *d, size_t n) {
+  twai_message_t m = {};
+  m.identifier       = id;
+  m.data_length_code = 8;
+  memset(m.data, CAN_PADDING, 8);
+  memcpy(m.data, d, n);
+  return twai_transmit(&m, pdMS_TO_TICKS(50)) == ESP_OK;
+}
+
+// Waits for the tester's flow control frame (sent to fcId). Returns false on timeout or abort.
+static bool canWaitFlowControl(uint16_t fcId, uint8_t &blockSize, uint32_t &gapUs) {
+  uint32_t start = millis();
+  while (millis() - start < CAN_FC_WAIT_MS) {
+    twai_message_t m;
+    if (twai_receive(&m, pdMS_TO_TICKS(10)) != ESP_OK) continue;
+    if (m.extd || m.identifier != fcId || m.data_length_code < 3 || (m.data[0] >> 4) != 3) continue;
+    uint8_t status = m.data[0] & 0x0F;
+    if (status == 1) { start = millis(); continue; }   // wait
+    if (status != 0) return false;                      // overflow / abort
+    blockSize = m.data[1];
+    uint8_t st = m.data[2];
+    gapUs = st <= 0x7F ? st * 1000UL : (st >= 0xF1 && st <= 0xF9 ? (st - 0xF0) * 100UL : 127000UL);
+    return true;
+  }
+  return false;
+}
+
+// Sends an answer as single frame or as first frame + consecutive frames with flow control.
+static void canSend(uint16_t id, uint16_t fcId, const uint8_t *data, size_t len) {
+  uint8_t f[8];
+  if (len <= 7) {
+    f[0] = len;
+    memcpy(f + 1, data, len);
+    canFrame(id, f, len + 1);
+    return;
+  }
+  f[0] = 0x10 | ((len >> 8) & 0x0F);
+  f[1] = len & 0xFF;
+  memcpy(f + 2, data, 6);
+  if (!canFrame(id, f, 8)) return;
+  size_t   pos = 6;
+  uint8_t  seq = 1;
+  uint8_t  blockSize;
+  uint32_t gapUs;
+  if (!canWaitFlowControl(fcId, blockSize, gapUs)) return;
+  uint8_t inBlock = 0;
+  while (pos < len) {
+    size_t chunk = min<size_t>(7, len - pos);
+    f[0] = 0x20 | (seq++ & 0x0F);
+    memcpy(f + 1, data + pos, chunk);
+    if (!canFrame(id, f, chunk + 1)) return;
+    pos += chunk;
+    if (pos >= len) break;
+    if (blockSize && ++inBlock >= blockSize) {
+      inBlock = 0;
+      if (!canWaitFlowControl(fcId, blockSize, gapUs)) return;
+    } else if (gapUs) {
+      delayMicroseconds(gapUs);
+    }
+  }
+}
+
+// Answers single-frame requests on the bus; restarts the controller after bus-off.
+static void canLoop() {
+  if (!canUp) return;
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) == ESP_OK) {
+    if (st.state == TWAI_STATE_BUS_OFF) { twai_initiate_recovery(); return; }
+    if (st.state == TWAI_STATE_STOPPED) { twai_start(); return; }
+  }
+  twai_message_t m;
+  while (twai_receive(&m, 0) == ESP_OK) {
+    if (m.extd || m.rtr || m.data_length_code < 2 || (m.data[0] >> 4) != 0) continue;
+    size_t n = m.data[0] & 0x0F;
+    if (n == 0 || n > 7) continue;
+    const uint8_t *req = m.data + 1;
+    uint16_t       rx;
+    const uint8_t *rec;
+    size_t         len;
+    uint8_t        neg[3];
+    if (recordedAnswer(m.identifier, req, n, rx, rec, len, neg)) {
+      canSend(rx, m.identifier, rec, len);
+    } else if (m.identifier == OBD_FUNCTIONAL || m.identifier == ECU_REQUEST) {
+      updateVehicle();
       uint8_t resp[64];
-      size_t  len = 0;
-      resp[len++] = 0x41;
-      for (size_t i = 1; i < n && i <= 6; i++) {
-        uint8_t data[4];
-        int dl = readPid01(req[i], data);
-        if (dl < 0) continue;
-        resp[len++] = req[i];
-        memcpy(resp + len, data, dl);
-        len += dl;
-      }
-      if (len == 1) printLine("NO DATA");
-      else sendEcuResponse(resp, len);
-      break;
+      len = ecuAnswer(req, n, resp);
+      if (len) canSend(ECU_RESPONSE, ECU_REQUEST, resp, len);
     }
-    case 0x03: sendDtcList(0x43, dtcs, dtcCount); break;
-    case 0x07: sendDtcList(0x47, nullptr, 0); break;
-    case 0x0A: sendDtcList(0x4A, nullptr, 0); break;
-    case 0x04: {
-      dtcCount = 0;
-      car.distMil = 0;
-      uint8_t r[] = { 0x44 };
-      sendEcuResponse(r, 1);
-      break;
-    }
-    case 0x09:
-      if (n < 2) printLine("NO DATA");
-      else handleMode09(req[1]);
-      break;
-    case 0x02:  // freeze frame not implemented
-      printLine("NO DATA");
-      break;
-    default:
-      sendNegative(mode, 0x11);  // serviceNotSupported
-      break;
   }
 }
 
@@ -542,6 +714,30 @@ static void handleAt(const String &a) {
     return;
   }
   if (a == "MA") { monitorAll(); return; }
+
+  if (a.startsWith("SH") && a.length() == 5 && isxdigit(a[2]) && isxdigit(a[3]) && isxdigit(a[4])) {
+    elmHeader = strtoul(a.c_str() + 2, nullptr, 16);
+    printLine("OK");
+    return;
+  }
+
+  // PitLogger extension: list (ATPLV) or select (ATPLVn) the emulated vehicle
+  if (a.startsWith("PLV")) {
+    if (a.length() == 3) {
+      printLine(String(vehicleSel == 0 ? "*" : " ") + "0 Simulated VW Golf (standard OBD-II only)");
+      for (uint8_t i = 0; i < REC_VEHICLE_COUNT; i++) {
+        printLine(String(vehicleSel == i + 1 ? "*" : " ") + (i + 1) + " " + REC_VEHICLES[i].name + ", " +
+                  REC_VEHICLES[i].requestCount + " recorded requests");
+      }
+      return;
+    }
+    int v = a.substring(3).toInt();
+    if (!isdigit(a[3]) || v < 0 || v > REC_VEHICLE_COUNT) { printLine("?"); return; }
+    vehicleSel = v;
+    prefs.putUChar("vehicle", vehicleSel);
+    printLine("OK");
+    return;
+  }
 
   if (onOff(a, "E", cfg.echo) || onOff(a, "L", cfg.linefeed) ||
       onOff(a, "S", cfg.spaces) || onOff(a, "H", cfg.headers)) {
@@ -692,6 +888,9 @@ static void checkBtSwitch() {
 
 void setup() {
   Serial.begin(ELM_BAUD);
+  prefs.begin("emulator");
+  vehicleSel = prefs.getUChar("vehicle", 1);
+  if (vehicleSel > REC_VEHICLE_COUNT) vehicleSel = 0;
   resetSettings();
   initVehicle();
   randomSeed(esp_random());
@@ -704,6 +903,7 @@ void setup() {
   delay(10);
   initBluetooth();
   setBluetooth(btWanted());
+  canBegin();
 
   delay(200);
   io = &Serial;
@@ -715,6 +915,7 @@ void setup() {
 void loop() {
   updateVehicle();
   checkBtSwitch();
+  canLoop();
   pollPort(ports[0]);
   if (btActive) {
     pollPort(ports[1]);
