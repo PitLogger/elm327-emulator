@@ -1,68 +1,68 @@
-# ELM327-Emulator für ESP32
+# ELM327 emulator for ESP32
 
-Ein ESP32 verhält sich wie ein ELM327-OBD-II-Adapter an einem Fahrzeug mit CAN-Bus
-(ISO 15765-4, 11 bit, 500 kbit/s). Damit lassen sich OBD-Apps, Diagnose-Tools und eigene
-Projekte am Schreibtisch entwickeln und testen – ganz ohne Auto.
+An ESP32 that behaves like an ELM327 OBD-II adapter connected to a vehicle with a CAN bus
+(ISO 15765-4, 11 bit, 500 kbit/s). Develop and test OBD apps, diagnostic tools and your own
+projects at your desk – no car needed.
 
-Entstanden im PitLogger-Projekt, steht aber für sich allein und ist mit jeder
-ELM327-kompatiblen Software nutzbar.
+Created as part of the PitLogger project, but stands on its own and works with any
+ELM327-compatible software.
 
-## Funktionen
+## Features
 
-- **Drei Schnittstellen gleichzeitig**
-  - USB-Seriell: 38400 Baud, 8N1, Zeilenende CR
-  - Bluetooth Classic (SPP) als `OBDII`, PIN `1234` – wie günstige ELM327-Adapter
-  - Bluetooth Low Energy als `OBDII`: Service `FFF0`, Antworten per Notify auf `FFF1`,
-    Befehle per Write auf `FFF2` – wie Vgate-/Veepeak-BLE-Adapter
-- **Simuliertes Fahrprofil:** Geschwindigkeit pendelt alle 90 s zwischen 0 und 120 km/h,
-  Drehzahl, Last, Luftmasse usw. laufen mit, der Motor wird langsam warm, der Tank leert sich
-- **AT-Befehle:** `Z`, `WS`, `D`, `I`, `@1`, `E0/1`, `L0/1`, `S0/1`, `H0/1`, `SP`/`TP`, `DP`, `DPN`,
-  `RV`, `MA` (Monitor All); weitere werden mit `OK` quittiert
-- **Mode 01** Live-Daten, mehrere PIDs pro Anfrage (z.B. `010C0D11`):
+- **Three interfaces at the same time**
+  - USB serial: 38400 baud, 8N1, line ending CR
+  - Bluetooth Classic (SPP) as `OBDII`, PIN `1234` – like cheap ELM327 adapters
+  - Bluetooth Low Energy as `OBDII`: service `FFF0`, responses via notify on `FFF1`,
+    commands via write on `FFF2` – like Vgate / Veepeak BLE adapters
+- **Simulated drive profile:** speed swings between 0 and 120 km/h every 90 s, engine speed,
+  load, mass air flow etc. follow, the engine slowly warms up, the tank empties
+- **AT commands:** `Z`, `WS`, `D`, `I`, `@1`, `E0/1`, `L0/1`, `S0/1`, `H0/1`, `SP`/`TP`, `DP`, `DPN`,
+  `RV`, `MA` (monitor all); others are acknowledged with `OK`
+- **Mode 01** live data, several PIDs per request (e.g. `010C0D11`):
   `01 04 05 06 07 0B 0C 0D 0E 0F 10 11 1C 1F 21 2F 33 42 46 51 5C`
-- **Mode 03 / 07 / 0A** Fehlercodes (gespeichert: `P0133`, `P0301`), **Mode 04** Fehler löschen
-- **Mode 09** Fahrgestellnummer (Multi-Frame / ISO-TP) und Steuergerätename
-- Antworten mit/ohne Header (`ATH1`/`ATH0`) und mit/ohne Leerzeichen (`ATS1`/`ATS0`)
+- **Mode 03 / 07 / 0A** trouble codes (stored: `P0133`, `P0301`), **mode 04** clear codes
+- **Mode 09** VIN (multi-frame / ISO-TP) and ECU name
+- Responses with/without headers (`ATH1`/`ATH0`) and with/without spaces (`ATS1`/`ATS0`)
 
 ## Hardware
 
-- ESP32 **mit Bluetooth Classic**, also das ursprüngliche ESP32 (z.B. ESP32-DevKitC, ESP32-WROOM-32).
-  ESP32-S2/S3/C3 haben kein Bluetooth Classic.
-- Optional: **GPIO 13 gegen GND** macht den Emulator unsichtbar (trennt Verbindungen, keine
-  Bluetooth-Sichtbarkeit). Offen = Bluetooth an. Die Onboard-LED an GPIO 2 zeigt den Zustand.
+- ESP32 **with Bluetooth Classic**, i.e. the original ESP32 (e.g. ESP32-DevKitC,
+  ESP32-WROOM-32). ESP32-S2/S3/C3 have no Bluetooth Classic.
+- Optional: **GPIO 13 to GND** makes the emulator invisible (drops connections, no Bluetooth
+  discoverability). Left open = Bluetooth on. The onboard LED on GPIO 2 shows the state.
 
-## Bauen und Flashen
+## Build and flash
 
-Benötigt [arduino-cli](https://arduino.github.io/arduino-cli/) oder die Arduino IDE mit dem
-ESP32-Core von Espressif (getestet mit **esp32:esp32 3.3.12**). Weitere Bibliotheken sind nicht nötig.
+Requires [arduino-cli](https://arduino.github.io/arduino-cli/) or the Arduino IDE with
+Espressif's ESP32 core (tested with **esp32:esp32 3.3.12**). No other libraries needed.
 
 ```bash
 arduino-cli compile --upload -p COM3 ELM327_Emulator
 ```
 
-Board und Partitionsschema (`huge_app`, Classic + BLE passen nicht ins Standardschema) stehen in
-`ELM327_Emulator/sketch.yaml`. In der Arduino IDE: Board „ESP32 Dev Module“,
-Partition Scheme „Huge APP (3MB No OTA/1MB SPIFFS)“.
+Board and partition scheme (`huge_app`, Classic + BLE do not fit the default scheme) are set
+in `ELM327_Emulator/sketch.yaml`. In the Arduino IDE: board "ESP32 Dev Module",
+partition scheme "Huge APP (3MB No OTA/1MB SPIFFS)".
 
-**Board geht nicht in den Download-Modus** (`Wrong boot mode detected`)? Manche Boards haben keine
-funktionierende Auto-Reset-Schaltung. Dann BOOT gedrückt halten, kurz EN drücken, BOOT loslassen
-und ohne Reset flashen, z.B.:
+**Board does not enter download mode** (`Wrong boot mode detected`)? Some boards have no
+working auto-reset circuit. Hold BOOT, press EN briefly, release BOOT and flash without
+reset, e.g.:
 
 ```bash
 esptool --chip esp32 --port COM3 --before no-reset write-flash 0x10000 ELM327_Emulator.ino.bin
 ```
 
-## Testen
+## Testing
 
-`tools/elm_test.py` schickt eine Reihe typischer Befehle über USB und zeigt die Antworten:
+`tools/elm_test.py` sends a series of typical commands over USB and prints the responses:
 
 ```bash
 pip install pyserial
 python tools/elm_test.py COM3
 ```
 
-Über Bluetooth funktioniert jede OBD-App (z.B. Car Scanner, Torque) – Adapter „OBDII“ wählen.
+Over Bluetooth, any OBD app works (e.g. Car Scanner, Torque) – pick the adapter "OBDII".
 
-## Lizenz
+## License
 
-MIT, siehe [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

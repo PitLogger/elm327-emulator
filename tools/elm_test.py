@@ -1,7 +1,7 @@
-"""Kleiner Test-Client für den ESP32-ELM327-Emulator.
+"""Small test client for the ESP32 ELM327 emulator.
 
-Aufruf:  python tools/elm_test.py [PORT] [BAUD]
-Standard: COM3, 38400 Baud
+Usage:    python tools/elm_test.py [PORT] [BAUD]
+Defaults: COM3, 38400 baud
 """
 import sys
 import time
@@ -30,9 +30,9 @@ def send(ser: serial.Serial, cmd: str, timeout: float = 3.0) -> str:
 
 
 def main() -> None:
-    # dsrdtr/rtscts aus, damit das Öffnen den ESP32 möglichst nicht resettet
+    # dsrdtr/rtscts off, so that opening the port ideally does not reset the ESP32
     with serial.Serial(PORT, BAUD, timeout=0.1, dsrdtr=False, rtscts=False) as ser:
-        time.sleep(1.5)  # falls der ESP32 doch beim Öffnen neu startet
+        time.sleep(1.5)  # in case the ESP32 restarts when the port is opened
         ser.reset_input_buffer()
         for cmd in COMMANDS:
             reply = send(ser, cmd)

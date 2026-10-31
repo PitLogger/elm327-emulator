@@ -1,32 +1,30 @@
 /*
- * ELM327-Emulator für ESP32
+ * ELM327 emulator for ESP32
  * ---------------------------------------------------------------
- * Der ESP32 verhält sich über die USB-Seriell-Schnittstelle (z.B. COM3)
- * wie ein ELM327 OBD-II-Adapter, der an einem Fahrzeug mit
- * ISO 15765-4 CAN (11 bit, 500 kbit/s) hängt.
+ * The ESP32 behaves like an ELM327 OBD-II adapter connected to a vehicle with
+ * ISO 15765-4 CAN (11 bit, 500 kbit/s).
  *
- * Unterstützt:
- *   - AT-Befehle: Z, WS, D, I, @1, E0/1, L0/1, S0/1, H0/1, SP/TP, DP, DPN,
- *                 RV, MA (Monitor All) und viele weitere werden mit OK quittiert
- *   - Mode 01: Live-Daten (simuliertes Fahrprofil), mehrere PIDs pro Anfrage
- *   - Mode 03/07/0A: Fehlercodes, Mode 04: Fehler löschen
- *   - Mode 09: VIN (Multi-Frame / ISO-TP) und ECU-Name
- *   - Antworten mit/ohne Header (ATH1/ATH0) und mit/ohne Leerzeichen (ATS0/1)
+ * Supported:
+ *   - AT commands: Z, WS, D, I, @1, E0/1, L0/1, S0/1, H0/1, SP/TP, DP, DPN,
+ *                  RV, MA (monitor all); many others are acknowledged with OK
+ *   - mode 01: live data (simulated drive profile), several PIDs per request
+ *   - mode 03/07/0A: trouble codes, mode 04: clear trouble codes
+ *   - mode 09: VIN (multi-frame / ISO-TP) and ECU name
+ *   - responses with/without headers (ATH1/ATH0) and with/without spaces (ATS0/1)
  *
- * Erreichbar über drei Wege (gleichzeitig nutzbar):
- *   - USB-Seriell (z.B. COM3), 38400 Baud, 8N1, Zeilenende CR
- *   - Bluetooth Classic SPP unter dem Namen "OBDII" (wie günstige ELM327-BT-Adapter)
- *   - Bluetooth Low Energy unter dem Namen "OBDII" (wie Vgate/Veepeak-BLE-Adapter):
- *     Service FFF0, Antworten per Notify auf FFF1, Befehle per Write auf FFF2
+ * Reachable in three ways (usable at the same time):
+ *   - USB serial (e.g. COM3), 38400 baud, 8N1, line ending CR
+ *   - Bluetooth Classic SPP named "OBDII" (like cheap ELM327 BT adapters)
+ *   - Bluetooth Low Energy named "OBDII" (like Vgate/Veepeak BLE adapters):
+ *     service FFF0, responses via notify on FFF1, commands via write on FFF2
  *
- * Bluetooth-Schalter: Bluetooth ist standardmäßig an. GPIO 13 mit GND brücken
- * macht den Emulator unsichtbar (trennt Verbindungen, keine Werbung/Sichtbarkeit).
- * Boards ohne herausgeführten GPIO 13 haben dadurch immer Bluetooth (interner
- * Pull-up). Umschalten geht im laufenden Betrieb, die Onboard-LED (GPIO 2) zeigt
- * den Zustand an.
+ * Bluetooth switch: Bluetooth is on by default. Connecting GPIO 13 to GND makes the
+ * emulator invisible (drops connections, no advertising / discoverability). Boards
+ * without GPIO 13 broken out therefore always have Bluetooth (internal pull-up).
+ * Switching works at runtime; the onboard LED (GPIO 2) shows the state.
  *
- * Board: ESP32 mit Bluetooth Classic (das ursprüngliche ESP32, nicht S2/S3/C3).
- * Classic + BLE passen nicht mehr ins Standard-Partitionsschema:
+ * Board: ESP32 with Bluetooth Classic (the original ESP32, not S2/S3/C3).
+ * Classic + BLE no longer fit into the default partition scheme:
  *   arduino-cli compile --upload -p COM3 --fqbn esp32:esp32:esp32:PartitionScheme=huge_app ELM327_Emulator
  */
 
@@ -39,28 +37,28 @@
 #include <freertos/stream_buffer.h>
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED) || !defined(CONFIG_BT_SPP_ENABLED)
-#error "Bluetooth Classic (SPP) ist für dieses Board nicht verfügbar"
+#error "Bluetooth Classic (SPP) is not available on this board"
 #endif
 
-// ---------------- Konfiguration ----------------
-#define BT_NAME         "OBDII"               // Gerätename, wie ihn die meisten ELM327-Adapter melden
-#define BT_PIN          "1234"                // Kopplungs-PIN (Legacy Pairing) wie bei echten Adaptern
-#define BT_SWITCH_PIN   13                    // mit GND gebrückt = Bluetooth aus
-#define BT_LED_PIN      2                     // LED leuchtet bei aktivem Bluetooth, -1 = keine LED
+// ---------------- Configuration ----------------
+#define BT_NAME         "OBDII"               // device name reported by most ELM327 adapters
+#define BT_PIN          "1234"                // pairing PIN (legacy pairing) as on real adapters
+#define BT_SWITCH_PIN   13                    // connected to GND = Bluetooth off
+#define BT_LED_PIN      2                     // LED on while Bluetooth is active, -1 = no LED
 #define BT_DEBOUNCE_MS  50
-#define BLE_SERVICE     0xFFF0                // wie viele BLE-ELM327 (Vgate, Veepeak, Clones)
+#define BLE_SERVICE     0xFFF0                // like many BLE ELM327 (Vgate, Veepeak, clones)
 #define BLE_NOTIFY      0xFFF1                // Adapter -> App
 #define BLE_WRITE       0xFFF2                // App -> Adapter
-#define BLE_CHUNK       20                    // Nutzdaten pro Notify bei Standard-MTU
-#define ELM_BAUD        38400                 // Standard-Baudrate eines ELM327
+#define BLE_CHUNK       20                    // payload per notification at the default MTU
+#define ELM_BAUD        38400                 // default baud rate of an ELM327
 #define ELM_VERSION     "ELM327 v1.5"
 #define ELM_DEVICE_DESC "OBDII to RS232 Interpreter"
-#define ECU_HEADER      "7E8"                 // CAN-ID der Antworten des Motorsteuergeräts
+#define ECU_HEADER      "7E8"                 // CAN ID of the engine control unit's responses
 
-static const char VIN[]      = "WVWZZZ1KZ6W000001";   // genau 17 Zeichen
-static const char ECU_NAME[] = "ECM-EngineControl";   // max. 20 Zeichen
+static const char VIN[]      = "WVWZZZ1KZ6W000001";   // exactly 17 characters
+static const char ECU_NAME[] = "ECM-EngineControl";   // max. 20 characters
 
-// ---------------- ELM-Zustand ----------------
+// ---------------- ELM state ----------------
 struct ElmSettings {
   bool    echo;
   bool    linefeed;
@@ -70,8 +68,8 @@ struct ElmSettings {
   uint8_t protocol;
 };
 
-// Jede Schnittstelle hat ihren eigenen Eingabepuffer; geantwortet wird immer
-// auf der Schnittstelle, von der der aktuelle Befehl kam.
+// Every interface has its own input buffer; the response always goes to
+// the interface the current command came from.
 struct Port {
   Stream *stream;
   char    lineBuf[64];
@@ -79,8 +77,8 @@ struct Port {
   bool    lineOverflow;
 };
 
-// Stream über BLE-GATT: Writes auf FFF2 landen im Empfangspuffer, Ausgaben werden
-// gesammelt und spätestens beim '>'-Prompt als Notify auf FFF1 verschickt.
+// Stream over BLE GATT: writes to FFF2 go into the receive buffer, output is collected
+// and sent as a notification on FFF1 at the latest with the '>' prompt.
 class BleStream : public Stream {
 public:
   void begin(BLECharacteristic *notifyChar) {
@@ -99,7 +97,7 @@ public:
     uint8_t c;
     return rx && xStreamBufferReceive(rx, &c, 1, 0) == 1 ? c : -1;
   }
-  int peek() override { return -1; }   // wird vom Emulator nicht benutzt
+  int peek() override { return -1; }   // not used by the emulator
   size_t write(uint8_t c) override {
     if (!connected) return 1;
     txBuf[txLen++] = c;
@@ -161,7 +159,7 @@ static void resetSettings() {
   cfg.protocol     = 6;
 }
 
-// ---------------- Simuliertes Fahrzeug ----------------
+// ---------------- Simulated vehicle ----------------
 struct Vehicle {
   float rpm, speed, throttle, load, maf, mapKpa, timing;
   float coolant, oil, intake, ambient, baro;
@@ -186,8 +184,8 @@ static void initVehicle() {
   car.startMs   = millis();
 }
 
-// Einfaches Fahrprofil: Geschwindigkeit pendelt alle 90 s zwischen 0 und 120 km/h,
-// Motor wird langsam warm, Tank leert sich.
+// Simple drive profile: speed swings between 0 and 120 km/h every 90 s,
+// the engine slowly warms up, the tank empties.
 static void updateVehicle() {
   static uint32_t last = 0;
   uint32_t now = millis();
@@ -215,7 +213,7 @@ static void updateVehicle() {
   if (dtcCount > 0) car.distMil += car.speed * dt / 3600.0f;
 }
 
-// ---------------- Ausgabe-Hilfen ----------------
+// ---------------- Output helpers ----------------
 static void eol() {
   io->print('\r');
   if (cfg.linefeed) io->print('\n');
@@ -233,8 +231,8 @@ static void appendByte(String &out, uint8_t b) {
   out += hex;
 }
 
-// Gibt eine ECU-Antwort aus. Bis 7 Byte als Single Frame, darüber als
-// ISO-TP Multi-Frame im typischen ELM327-Format.
+// Outputs an ECU response. Up to 7 bytes as a single frame, above that as an
+// ISO-TP multi-frame in the typical ELM327 format.
 static void sendEcuResponse(const uint8_t *data, size_t len) {
   if (len <= 7) {
     String line;
@@ -307,7 +305,7 @@ static uint32_t supportBitmask(uint8_t base) {
 static uint8_t pct(float v)  { return (uint8_t)constrain(lroundf(v * 255.0f / 100.0f), 0L, 255L); }
 static uint8_t temp(float v) { return (uint8_t)constrain(lroundf(v + 40.0f), 0L, 255L); }
 
-// Schreibt die Datenbytes eines PIDs nach out, liefert die Anzahl oder -1.
+// Writes the data bytes of a PID to out, returns the count or -1.
 static int readPid01(uint8_t pid, uint8_t *out) {
   if ((pid & 0x1F) == 0) {
     if (pid != 0 && !anySupportedAbove(pid)) return -1;
@@ -319,13 +317,13 @@ static int readPid01(uint8_t pid, uint8_t *out) {
 
   uint16_t v;
   switch (pid) {
-    case 0x01:  // Monitorstatus: MIL + Anzahl DTCs
+    case 0x01:  // monitor status: MIL + number of DTCs
       out[0] = (dtcCount ? 0x80 : 0x00) | (dtcCount & 0x7F);
       out[1] = 0x07; out[2] = 0xE5; out[3] = 0x00;
       return 4;
     case 0x04: out[0] = pct(car.load); return 1;
     case 0x05: out[0] = temp(car.coolant); return 1;
-    case 0x06:                              // Kurzzeit-Kraftstofftrimm Bank 1
+    case 0x06:                              // short-term fuel trim bank 1
     case 0x07: out[0] = 0x80 + random(-3, 4); return 1;
     case 0x0B: out[0] = (uint8_t)car.mapKpa; return 1;
     case 0x0C:
@@ -356,13 +354,13 @@ static int readPid01(uint8_t pid, uint8_t *out) {
       out[0] = v >> 8; out[1] = v;
       return 2;
     case 0x46: out[0] = temp(car.ambient); return 1;
-    case 0x51: out[0] = 0x01; return 1;     // Benzin
+    case 0x51: out[0] = 0x01; return 1;     // gasoline
     case 0x5C: out[0] = temp(car.oil); return 1;
   }
   return -1;
 }
 
-// ---------------- OBD-Anfragen ----------------
+// ---------------- OBD requests ----------------
 static void sendNegative(uint8_t mode, uint8_t nrc) {
   uint8_t r[] = { 0x7F, mode, nrc };
   sendEcuResponse(r, sizeof(r));
@@ -410,7 +408,7 @@ static void handleObd(String cmd) {
   for (size_t i = 0; i < cmd.length(); i++) {
     if (!isxdigit(cmd[i])) { printLine("?"); return; }
   }
-  // Ungerade Länge: letzte Ziffer ist die erwartete Antwortanzahl (z.B. "010C1")
+  // odd length: the last digit is the expected number of responses (e.g. "010C1")
   if (cmd.length() % 2 == 1) {
     if (cmd.length() < 3) { printLine("?"); return; }
     cmd.remove(cmd.length() - 1);
@@ -453,7 +451,7 @@ static void handleObd(String cmd) {
       if (n < 2) printLine("NO DATA");
       else handleMode09(req[1]);
       break;
-    case 0x02:  // Freeze Frame nicht implementiert
+    case 0x02:  // freeze frame not implemented
       printLine("NO DATA");
       break;
     default:
@@ -462,7 +460,7 @@ static void handleObd(String cmd) {
   }
 }
 
-// ---------------- AT-Befehle ----------------
+// ---------------- AT commands ----------------
 static bool onOff(const String &a, const char *prefix, bool &target) {
   if (a == String(prefix) + "0") { target = false; return true; }
   if (a == String(prefix) + "1") { target = true;  return true; }
@@ -485,7 +483,7 @@ static bool setProtocol(String arg) {
   return true;
 }
 
-// ATMA: gibt simulierten CAN-Busverkehr aus, bis ein Zeichen empfangen wird.
+// ATMA: outputs simulated CAN bus traffic until a character is received.
 static void monitorAll() {
   uint8_t idx = 0;
   while (!io->available()) {
@@ -516,7 +514,7 @@ static void monitorAll() {
     printLine(line);
     delay(20);
   }
-  io->read();  // Abbruchzeichen verwerfen
+  io->read();  // discard the stop character
 }
 
 static void handleAt(const String &a) {
@@ -556,7 +554,7 @@ static void handleAt(const String &a) {
     return;
   }
 
-  // Befehle, die nur quittiert werden (Timing, Filter, Header, ...)
+  // commands that are only acknowledged (timing, filters, headers, ...)
   static const char *ACK_PREFIXES[] = {
     "M", "AT", "CAF", "CFC", "AL", "NL", "ST", "SH", "CRA", "CF", "CM", "FC",
     "PC", "SW", "IB", "IIA", "KW", "BI", "V", "R", "CEA", "SS", "D0", "D1",
@@ -568,14 +566,14 @@ static void handleAt(const String &a) {
   printLine("?");
 }
 
-// ---------------- Befehlsverarbeitung ----------------
+// ---------------- Command processing ----------------
 static void processLine(Port &port) {
   String cmd;
   if (port.lineOverflow) {
     printLine("?");
   } else {
     cmd = String(port.lineBuf).substring(0, port.lineLen);
-    if (cmd.length() == 0) cmd = lastCmd;   // leere Zeile wiederholt letzten Befehl
+    if (cmd.length() == 0) cmd = lastCmd;   // an empty line repeats the last command
     else lastCmd = cmd;
 
     if (cmd.startsWith("AT")) handleAt(cmd.substring(2));
@@ -626,7 +624,7 @@ class BleWriteCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-// Beide Stacks laufen dauerhaft; SerialBT.end() würde Bluedroid und damit auch BLE abschalten.
+// Both stacks run permanently; SerialBT.end() would shut down Bluedroid and with it BLE.
 static void initBluetooth() {
   SerialBT.begin(BT_NAME);
   SerialBT.setPin(BT_PIN, strlen(BT_PIN));
@@ -646,12 +644,12 @@ static void initBluetooth() {
 
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(BLEUUID((uint16_t)BLE_SERVICE));
-  adv->setScanResponse(true);   // Name steht in der Scan-Antwort
+  adv->setScanResponse(true);   // the name is in the scan response
   BLEDevice::startAdvertising();
-  btActive = true;              // nach dem Start sind beide sichtbar
+  btActive = true;              // both are visible after start-up
 }
 
-// Schaltet die Sichtbarkeit beider Bluetooth-Varianten um und trennt bestehende Verbindungen.
+// Switches the visibility of both Bluetooth variants and drops existing connections.
 static void setBluetooth(bool on) {
   if (on == btActive) return;
   btActive = on;
@@ -674,12 +672,12 @@ static void setBluetooth(bool on) {
 #endif
 }
 
-// Offener Pin (interner Pull-up) = Bluetooth an, gegen GND gebrückt = aus.
+// Open pin (internal pull-up) = Bluetooth on, connected to GND = off.
 static bool btWanted() {
   return digitalRead(BT_SWITCH_PIN) == HIGH;
 }
 
-// Entprellt: der neue Zustand gilt erst, wenn er BT_DEBOUNCE_MS stabil anliegt.
+// Debounced: a new state only applies once it has been stable for BT_DEBOUNCE_MS.
 static void checkBtSwitch() {
   static bool     lastRaw   = btWanted();
   static uint32_t changedAt = 0;
