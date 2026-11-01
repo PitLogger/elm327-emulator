@@ -18,6 +18,7 @@
  * vehicle on a real 500 kbit/s CAN bus: it answers OBD-II requests (7DF / 7E0 -> 7E8) and the
  * recorded manufacturer requests of the selected vehicle, with ISO-TP flow control.
  *
+ * "ATPLC" shows the state of the CAN controller.
  * Vehicle: "ATPLV" lists the vehicles, "ATPLV1" selects one (stored across restarts).
  *   0 = simulated VW Golf (only standard OBD-II), 1 = Hyundai i30 N 2021, 2 = Toyota bZ4X 2022
  *
@@ -530,7 +531,8 @@ static void handleObd(String cmd) {
 }
 
 // ---------------- CAN bus (ISO 15765-2) ----------------
-static bool canUp;
+static bool     canUp;
+static uint32_t canReceived, canAnswered;   // for ATPLC
 
 static void canBegin() {
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX_PIN, (gpio_num_t)CAN_RX_PIN, TWAI_MODE_NORMAL);
@@ -613,6 +615,7 @@ static void canLoop() {
   }
   twai_message_t m;
   while (twai_receive(&m, 0) == ESP_OK) {
+    canReceived++;
     if (m.extd || m.rtr || m.data_length_code < 2 || (m.data[0] >> 4) != 0) continue;
     size_t n = m.data[0] & 0x0F;
     if (n == 0 || n > 7) continue;
@@ -622,12 +625,16 @@ static void canLoop() {
     size_t         len;
     uint8_t        neg[3];
     if (recordedAnswer(m.identifier, req, n, rx, rec, len, neg)) {
+      canAnswered++;
       canSend(rx, m.identifier, rec, len);
     } else if (m.identifier == OBD_FUNCTIONAL || m.identifier == ECU_REQUEST) {
       updateVehicle();
       uint8_t resp[64];
       len = ecuAnswer(req, n, resp);
-      if (len) canSend(ECU_RESPONSE, ECU_REQUEST, resp, len);
+      if (len) {
+        canAnswered++;
+        canSend(ECU_RESPONSE, ECU_REQUEST, resp, len);
+      }
     }
   }
 }
@@ -718,6 +725,17 @@ static void handleAt(const String &a) {
   if (a.startsWith("SH") && a.length() == 5 && isxdigit(a[2]) && isxdigit(a[3]) && isxdigit(a[4])) {
     elmHeader = strtoul(a.c_str() + 2, nullptr, 16);
     printLine("OK");
+    return;
+  }
+
+  // PitLogger extension: state of the CAN controller
+  if (a == "PLC") {
+    twai_status_info_t st;
+    if (!canUp || twai_get_status_info(&st) != ESP_OK) { printLine("CAN off"); return; }
+    static const char *STATES[] = { "stopped", "running", "bus-off", "recovering" };
+    printLine(String("CAN ") + (st.state < 4 ? STATES[st.state] : "?") + ", TX/RX errors " + st.tx_error_counter +
+              "/" + st.rx_error_counter + ", received " + canReceived + ", answered " + canAnswered +
+              ", bus errors " + st.bus_error_count);
     return;
   }
 
