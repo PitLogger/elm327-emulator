@@ -32,6 +32,8 @@ ELM327-compatible software.
 - **Busy control units:** `ATPLB300` makes the recorded control units answer "busy, repeat
   request" (`7F 22 21`) to a request repeated within 300 ms – to test how a logger copes with
   rate limits; `ATPLB0` switches it off. `ATPLC` shows the state of the CAN controller
+- **Vehicles without VIN:** `ATPLN1` makes the emulator not report its VIN (mode 09 PID 02), like
+  some electric vehicles; `ATPLN0` reports it again
 - **CAN bus:** with an SN65HVD230 transceiver the emulator answers on a real 500 kbit/s bus –
   OBD-II requests (`7DF` / `7E0` → `7E8`) and the recorded requests of the selected vehicle, with
   ISO-TP flow control. Ideal as the counterpart of a logger with a CAN interface

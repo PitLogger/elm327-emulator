@@ -20,6 +20,7 @@
  *
  * "ATPLC" shows the state of the CAN controller. "ATPLB300" makes the recorded control units
  * answer "busy" (7F xx 21) to a request repeated within 300 ms ("ATPLB0" = off, not stored).
+ * "ATPLN1" hides the VIN like some electric vehicles do ("ATPLN0" = report it, not stored).
  * Vehicle: "ATPLV" lists the vehicles, "ATPLV1" selects one (stored across restarts).
  *   0 = simulated VW Golf (only standard OBD-II), 1 = Hyundai i30 N 2021, 2 = Toyota bZ4X 2022
  *
@@ -158,7 +159,8 @@ static uint16_t elmHeader = OBD_FUNCTIONAL;   // set with ATSH
 // Selected vehicle: 0 = simulation only, 1.. = REC_VEHICLES[n - 1]
 static Preferences prefs;
 static uint8_t     vehicleSel;
-static uint16_t    busyMs;   // ATPLB: a recorded request asked again within this time gets "busy" (0 = off)
+static uint16_t    busyMs;
+static bool        hideVin;  // ATPLN1: behave like vehicles that do not report their VIN   // ATPLB: a recorded request asked again within this time gets "busy" (0 = off)
 
 static const RecVehicle *recVehicle() {
   return vehicleSel >= 1 && vehicleSel <= REC_VEHICLE_COUNT ? &REC_VEHICLES[vehicleSel - 1] : nullptr;
@@ -422,11 +424,12 @@ static size_t mode09(uint8_t pid, uint8_t *r) {
   r[n++] = pid;
   switch (pid) {
     case 0x00: {
-      uint32_t m = (1UL << (32 - 0x02)) | (1UL << (32 - 0x0A));
+      uint32_t m = (hideVin ? 0 : 1UL << (32 - 0x02)) | (1UL << (32 - 0x0A));
       r[n++] = m >> 24; r[n++] = m >> 16; r[n++] = m >> 8; r[n++] = m;
       return n;
     }
     case 0x02:
+      if (hideVin) return 0;
       r[n++] = 0x01;
       for (size_t i = 0; i < 17; i++) r[n++] = vin()[i];
       return n;
@@ -754,6 +757,13 @@ static void handleAt(const String &a) {
   if (a.startsWith("PLB")) {
     if (a.length() == 3) { printLine(busyMs ? String("busy below ") + busyMs + " ms" : String("busy mode off")); return; }
     busyMs = a.substring(3).toInt();
+    printLine("OK");
+    return;
+  }
+
+  // PitLogger extension: ATPLN1 = do not report the VIN (like some electric vehicles), ATPLN0 = report it
+  if (a == "PLN0" || a == "PLN1") {
+    hideVin = a[3] == '1';
     printLine("OK");
     return;
   }
