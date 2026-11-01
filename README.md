@@ -29,6 +29,9 @@ ELM327-compatible software.
   **Toyota bZ4X 2022** (traction battery, charging, …). Addressed with `ATSH` like on a real
   adapter, e.g. `ATSH7D1` then `220104`. `ATPLV` lists the vehicles, `ATPLV1` selects one
   (`0` = only the simulated VW Golf); the choice is kept across restarts
+- **Busy control units:** `ATPLB300` makes the recorded control units answer "busy, repeat
+  request" (`7F 22 21`) to a request repeated within 300 ms – to test how a logger copes with
+  rate limits; `ATPLB0` switches it off. `ATPLC` shows the state of the CAN controller
 - **CAN bus:** with an SN65HVD230 transceiver the emulator answers on a real 500 kbit/s bus –
   OBD-II requests (`7DF` / `7E0` → `7E8`) and the recorded requests of the selected vehicle, with
   ISO-TP flow control. Ideal as the counterpart of a logger with a CAN interface

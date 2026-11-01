@@ -18,7 +18,8 @@
  * vehicle on a real 500 kbit/s CAN bus: it answers OBD-II requests (7DF / 7E0 -> 7E8) and the
  * recorded manufacturer requests of the selected vehicle, with ISO-TP flow control.
  *
- * "ATPLC" shows the state of the CAN controller.
+ * "ATPLC" shows the state of the CAN controller. "ATPLB300" makes the recorded control units
+ * answer "busy" (7F xx 21) to a request repeated within 300 ms ("ATPLB0" = off, not stored).
  * Vehicle: "ATPLV" lists the vehicles, "ATPLV1" selects one (stored across restarts).
  *   0 = simulated VW Golf (only standard OBD-II), 1 = Hyundai i30 N 2021, 2 = Toyota bZ4X 2022
  *
@@ -157,6 +158,7 @@ static uint16_t elmHeader = OBD_FUNCTIONAL;   // set with ATSH
 // Selected vehicle: 0 = simulation only, 1.. = REC_VEHICLES[n - 1]
 static Preferences prefs;
 static uint8_t     vehicleSel;
+static uint16_t    busyMs;   // ATPLB: a recorded request asked again within this time gets "busy" (0 = off)
 
 static const RecVehicle *recVehicle() {
   return vehicleSel >= 1 && vehicleSel <= REC_VEHICLE_COUNT ? &REC_VEHICLES[vehicleSel - 1] : nullptr;
@@ -476,7 +478,8 @@ static bool recordedAnswer(uint16_t tx, const uint8_t *req, size_t n, uint16_t &
                            const uint8_t *&data, size_t &len, uint8_t *negative) {
   const RecVehicle *v = recVehicle();
   if (!v || n == 0) return false;
-  static uint8_t turn[256];
+  static uint8_t  turn[256];
+  static uint32_t served[256];   // millis() of the last answer per request
   bool knownUnit = false;
   for (uint16_t i = 0; i < v->requestCount; i++) {
     const RecRequest &r = v->requests[i];
@@ -484,6 +487,14 @@ static bool recordedAnswer(uint16_t tx, const uint8_t *req, size_t n, uint16_t &
     knownUnit = true;
     rx = r.rx;
     if (r.reqLen != n || memcmp(r.req, req, n) != 0) continue;
+    // like an overloaded control unit: too frequent requests get "busy, repeat request"
+    if (busyMs && served[i & 0xFF] && millis() - served[i & 0xFF] < busyMs) {
+      negative[0] = 0x7F; negative[1] = req[0]; negative[2] = 0x21;
+      data = negative;
+      len  = 3;
+      return true;
+    }
+    served[i & 0xFF] = millis();
     const RecAnswer &a = REC_ANSWERS[r.first + turn[i & 0xFF]++ % r.count];
     data = REC_DATA + a.offset;
     len  = a.len;
@@ -736,6 +747,14 @@ static void handleAt(const String &a) {
     printLine(String("CAN ") + (st.state < 4 ? STATES[st.state] : "?") + ", TX/RX errors " + st.tx_error_counter +
               "/" + st.rx_error_counter + ", received " + canReceived + ", answered " + canAnswered +
               ", bus errors " + st.bus_error_count);
+    return;
+  }
+
+  // PitLogger extension: busy control units (ATPLBn = at most one answer per n ms and request, 0 = off)
+  if (a.startsWith("PLB")) {
+    if (a.length() == 3) { printLine(busyMs ? String("busy below ") + busyMs + " ms" : String("busy mode off")); return; }
+    busyMs = a.substring(3).toInt();
+    printLine("OK");
     return;
   }
 
