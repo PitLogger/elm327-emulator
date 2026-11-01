@@ -21,6 +21,7 @@
  * "ATPLC" shows the state of the CAN controller. "ATPLB300" makes the recorded control units
  * answer "busy" (7F xx 21) to a request repeated within 300 ms ("ATPLB0" = off, not stored).
  * "ATPLN1" hides the VIN like some electric vehicles do ("ATPLN0" = report it, not stored).
+ * Firmware updates over the same USB port without BOOT/EN: python tools/serial_update.py COM8 file.bin
  * Vehicle: "ATPLV" lists the vehicles, "ATPLV1" selects one (stored across restarts).
  *   0 = simulated VW Golf (only standard OBD-II), 1 = Hyundai i30 N 2021, 2 = Toyota bZ4X 2022
  *
@@ -48,6 +49,8 @@
 #include <esp_gap_bt_api.h>
 #include <freertos/stream_buffer.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 #include <driver/twai.h>
 #include "vehicles.h"
 
@@ -75,6 +78,9 @@
 #define CAN_RX_PIN      22                    // to CRX of the SN65HVD230
 #define CAN_PADDING     0xAA                  // fills unused bytes of a frame
 #define CAN_FC_WAIT_MS  1000                  // wait for the tester's flow control frame
+#define UPDATE_BAUD     460800                // firmware update over USB (ATPLUPD)
+#define UPDATE_BLOCK    1024                  // bytes per acknowledged block
+#define UPDATE_TIMEOUT  5000                  // ms without data before the update is abandoned
 
 static const char SIM_VIN[]  = "WVWZZZ1KZ6W000001";   // exactly 17 characters
 static const char ECU_NAME[] = "ECM-EngineControl";   // max. 20 characters
@@ -710,6 +716,59 @@ static void monitorAll() {
   io->read();  // discard the stop character
 }
 
+// ---------------- Firmware update over USB ----------------
+// "ATPLUPD<size>,<md5>" (tools/serial_update.py): answers "READY", switches to UPDATE_BAUD and
+// receives the image in blocks of UPDATE_BLOCK bytes, each acknowledged with 'K'. The image goes
+// into the other app partition; with a matching MD5 the emulator answers "DONE" and restarts into
+// it, otherwise "ERR <reason>" and it carries on with the old firmware. No BOOT/EN needed.
+static void updateFailed(const String &why) {
+  Update.abort();
+  Serial.print("ERR " + why + "\r");
+  Serial.flush();
+  delay(50);
+  Serial.updateBaudRate(ELM_BAUD);
+}
+
+static void serialUpdate(const String &arg) {
+  if (io != &Serial) { printLine("? only over USB"); return; }
+  int comma = arg.indexOf(',');
+  size_t size = arg.substring(0, comma).toInt();
+  String md5 = comma > 0 ? arg.substring(comma + 1) : String();
+  md5.toLowerCase();
+  if (!size || md5.length() != 32) { printLine("?"); return; }
+  if (!Update.begin(size)) { printLine(String("ERR ") + Update.errorString()); return; }
+  Update.setMD5(md5.c_str());
+  Serial.print("READY\r");
+  Serial.flush();
+  delay(50);
+  Serial.updateBaudRate(UPDATE_BAUD);
+
+  static uint8_t buf[UPDATE_BLOCK];
+  size_t got = 0;
+  while (got < size) {
+    size_t want = min<size_t>(UPDATE_BLOCK, size - got), n = 0;
+    uint32_t last = millis();
+    while (n < want && millis() - last < UPDATE_TIMEOUT) {
+      int avail = Serial.available();
+      if (avail > 0) {
+        n += Serial.readBytes(buf + n, min<size_t>(avail, want - n));
+        last = millis();
+      } else {
+        delay(1);
+      }
+    }
+    if (n < want) return updateFailed("timeout after " + String(got + n) + " bytes");
+    if (Update.write(buf, n) != n) return updateFailed(Update.errorString());
+    got += n;
+    Serial.write('K');
+  }
+  if (!Update.end()) return updateFailed(Update.errorString());
+  Serial.print("DONE\r");
+  Serial.flush();
+  delay(200);
+  ESP.restart();
+}
+
 static void handleAt(const String &a) {
   if (a == "Z" || a == "WS") {
     delay(a == "Z" ? 500 : 100);
@@ -741,6 +800,16 @@ static void handleAt(const String &a) {
     printLine("OK");
     return;
   }
+
+  // PitLogger extension: build and app partition of the running firmware
+  if (a == "PLI") {
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    printLine(String("Build ") + __DATE__ + " " + __TIME__ + ", partition " + (run ? run->label : "?"));
+    return;
+  }
+
+  // PitLogger extension: firmware update over USB, see serialUpdate()
+  if (a.startsWith("PLUPD")) { serialUpdate(a.substring(5)); return; }
 
   // PitLogger extension: state of the CAN controller
   if (a == "PLC") {
@@ -934,6 +1003,7 @@ static void checkBtSwitch() {
 }
 
 void setup() {
+  Serial.setRxBufferSize(4 * UPDATE_BLOCK);   // a whole update block arrives before it is read
   Serial.begin(ELM_BAUD);
   prefs.begin("emulator");
   vehicleSel = prefs.getUChar("vehicle", 1);

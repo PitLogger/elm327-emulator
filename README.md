@@ -57,16 +57,26 @@ Espressif's ESP32 core (tested with **esp32:esp32 3.3.12**). No other libraries 
 arduino-cli compile --upload -p COM3 ELM327_Emulator
 ```
 
-Board and partition scheme (`huge_app`, Classic + BLE do not fit the default scheme) are set
-in `ELM327_Emulator/sketch.yaml`. In the Arduino IDE: board "ESP32 Dev Module",
-partition scheme "Huge APP (3MB No OTA/1MB SPIFFS)".
+Board and partition scheme (`min_spiffs`: Classic + BLE do not fit the default scheme, and two
+app partitions allow updates over USB) are set in `ELM327_Emulator/sketch.yaml`. In the Arduino
+IDE: board "ESP32 Dev Module", partition scheme "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)".
 
-**Board does not enter download mode** (`Wrong boot mode detected`)? Some boards have no
-working auto-reset circuit. Hold BOOT, press EN briefly, release BOOT and flash without
-reset, e.g.:
+**Updates over USB without buttons:** once the emulator runs this firmware (partition scheme
+`min_spiffs`, two app partitions), new versions go over the normal USB serial port – no BOOT/EN,
+no auto-reset circuit needed. The image is checked with MD5; on any error the old firmware keeps
+running. `ATPLI` shows the build and the running partition.
 
 ```bash
-esptool --chip esp32 --port COM3 --before no-reset write-flash 0x10000 ELM327_Emulator.ino.bin
+pip install pyserial
+python tools/serial_update.py COM3 build/ELM327_Emulator.ino.bin
+```
+
+**First installation / board does not enter download mode** (`Wrong boot mode detected`)? Some
+boards have no working auto-reset circuit. Hold BOOT, press EN briefly, release BOOT and flash the
+complete image without reset, e.g.:
+
+```bash
+esptool --chip esp32 --port COM3 --before no-reset write-flash 0x0 ELM327_Emulator.ino.merged.bin
 ```
 
 ## Testing

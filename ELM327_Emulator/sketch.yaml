@@ -1,3 +1,4 @@
 # Default board for "arduino-cli compile" without --fqbn.
-# Bluetooth Classic + BLE need the "huge_app" partition scheme.
-default_fqbn: esp32:esp32:esp32:PartitionScheme=huge_app
+# Bluetooth Classic + BLE need a large app partition; "min_spiffs" has two of 1.9 MB, so the
+# emulator can update itself over USB (tools/serial_update.py).
+default_fqbn: esp32:esp32:esp32:PartitionScheme=min_spiffs
